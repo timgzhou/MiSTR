@@ -3,120 +3,103 @@
 Tim G. Zhou, Anthony Fuller, Avery Ma, Geoff Pleiss, Evan Shelhamer
 (University of British Columbia, Vector Institute, RBC Borealis)
 
-Code, run configurations and results for the paper.
+MiSTR lets a remote-sensing transformer spend its compute where and when the task needs detail.
+A **coarse pass** encodes the whole time series at low resolution (8 px patches of seasonal
+composites) and predicts. From that prediction, MiSTR **selects** the points that need more detail:
+*where* the coarse prediction is uncertain, and *when*, by the decoder's attention. A sparse
+**fine pass** adds 4 px tokens of single months at those points only. Fine tokens read the
+cached coarse tokens (one-way attention), so the coarse pass is never recomputed, and the
+decoder combines both. The backbone is [OlmoEarth](https://github.com/allenai/olmoearth_pretrain).
 
-MiSTR (Mixed Spatiotemporal Resolution) makes a remote-sensing transformer spend its compute where and
-when the task needs detail. A full **coarse pass** encodes the time series at low resolution (large
-patches, seasonal composites) and predicts; from it, the model **selects** the spatiotemporal points
-that need more detail (where the coarse prediction is uncertain, and when, by the decoder's
-attention). A sparse **fine pass** adds high-resolution tokens (small patches, single months) at those
-points only; they read the cached coarse tokens (one-way attention), so the coarse pass is not
-recomputed, and the decoder pools both. The backbone is OlmoEarth (also TerraMind, Tessera in the
-appendix), fine-tuned end to end.
+This repository has two parts:
 
-```
-mistr/            the library
-  core/           the model (model, one-way encoder, decoder), window selection, run config, data batches
-  data/           multimodal, multitemporal datasets: PASTIS, PLANTEUR, BioMassters, YieldSAT, GEOID-Flood
-  encoders/       OlmoEarth, TerraMind
-  baselines/      compared methods: APT, vid-TLDR, AnyUp / Upsample Anything
-exp/              experiments, run as `python -m exp.<pkg>.<module>` from the repo root
-  mistr/          training (train; paper_configs = every run of the paper, paper_runs), probes, costs
-  geoidchange/    GEOID-Flood flood tracking (tiletrack) and its S1 series
-  tessera/        frozen Tessera v2 (App. H)
-  viz/            every figure and table of the paper
-results/          the results files every figure and table is drawn from
-manifests/        the exact Sentinel-1 passes of the GEOID-Flood tracking series
-notebooks/        two demos on released checkpoints (PASTIS, GEOID-Flood)
-```
+- `mistr/`: the model, ready to use (about 500 lines: `model.py`, `inputs.py`).
+- `paper/`: everything to reproduce the paper (training, baselines, every figure and table); see
+  [`paper/README.md`](paper/README.md).
 
 ## Install
 
-Python 3.12 and a CUDA GPU. FlashAttention is required: the datasets have missing timesteps, and
-OlmoEarth's SDPA path cannot mask missing tokens (it refuses such batches).
+A CUDA GPU and Python 3.12. The model runs on OlmoEarth's varlen FlashAttention, so
+`flash-attn` is required:
 
 ```shell
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install -r requirements-lock.txt                  # the exact versions of the paper's runs
+pip install torch==2.9.1
+pip install "mistr @ git+https://github.com/timgzhou/MiSTR"
 pip install wheel packaging ninja psutil
 FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE pip install --no-build-isolation flash-attn==2.8.3   # prebuilt wheel
-pip install --no-deps -e .
-python -m pytest -q                                   # data tests skip until the data is downloaded
 ```
 
-Tested from scratch in the `python:3.12` Docker image (PyPI wheels only, CUDA 12 driver).
-`pip install -e ".[flash]"` instead of the lock file takes the declared ranges.
+Other torch versions work as long as a `flash-attn` wheel exists for that torch / CUDA / Python combination.
 
-## Demo
+## Quickstart
 
-Two notebooks run released checkpoints on a few test samples (a GPU, about a minute each; no dataset
-download): `notebooks/01_pastis_mistr.ipynb` (crop types; MiSTR S8 seasonal + S4 monthly at a 50 %
-budget: predictions, the points it re-encodes, compute per tile) and
-`notebooks/02_geoid_flood_tracking.ipynb` (32-pass Sentinel-1 series; fixed S128, MiSTR S128 & S32,
-fixed S32). They read the files listed in `demo/MANIFEST.json` (checkpoints in `checkpoints/`, samples
-in `demo/`, with sha256 sums). The checkpoints and demo samples are not hosted yet; they will be
-linked here soon.
+```python
+from mistr import MiSTR, prepare
 
-## Data
+model = MiSTR.from_pretrained("TimZhou/mistr-olmoearth-tiny-pastis")   # downloads ~26 MB
 
-`docs/DATA.md`: where each dataset comes from, how to download and prepare it, and the
-GEOID-Flood Sentinel-1 series.
+x = prepare(s2, s2_dates, s1, s1_dates, start="2018-10")   # one image's time series, any size
+out = model.predict(x, budget=0.5)
 
-## Reproduce the paper
+out.classes        # (H, W) crop type per pixel (model.config["class_names"])
+out.logits         # (19, H, W)
+out.windows        # (N, 3) the re-encoded (month, y, x): 4 x 4 px windows, top-left pixel
+out.coarse_logits  # the coarse pass's own prediction
+```
 
-Every figure and table of the paper (numbers as printed), from the shipped `results/`. "data" = the
-datasets (`docs/DATA.md`); "ckpt" = trained checkpoints `checkpoints/<run>.pt` (train them with
-`exp.mistr.paper_runs`; released with the public code).
+**Inputs** (`prepare`):
 
-| Paper | Command (`python -m ...`) | Needs |
+| argument | shape | content |
 |---|---|---|
-| Fig 3 | `exp.viz.round1_main --paper` | |
-| Fig 4 | `exp.viz.baselines_r1 --side` | |
-| Fig 5 | `exp.viz.geoid_trackN tradeoff_col` | |
-| Fig 6 | `exp.viz.geoid_tracklong_paper rec=EMSR275-1-4_q1 combo=128c32 q=0.08 compact=1 out=figures/paper/06_GEOID-sample.pdf` | data, ckpt |
-| Figs 7, 8 | `exp.viz.space_time_ablation` | |
-| Fig 9 | `exp.viz.season_range_tradeoff` | |
-| Fig 10 | `exp.viz.round1_throughput` | |
-| Fig 11 | `exp.viz.selector_gallery_r1 --paper` | data, ckpt |
-| Fig 12 | `exp.viz.per_sample_compute`, `exp.viz.per_sample_compute --task biomassters` | data, ckpt |
-| Fig 13, Table 5 | `exp.viz.oneway_attn_trained --paper` | |
-| Fig 14 | `exp.viz.terramind_tradeoff paper` | |
-| Fig 15 | `exp.viz.tessera_frozen_tradeoff paper` | |
-| Fig 16, Tables 9, 10 | `exp.viz.round1_main_std --paper` | |
-| Fig 17 | `exp.viz.geoid_cutmix_long_example k=16 rec=EMSR352-1-282_q2 out=figures/paper/11_GEOID-Cutmix-sample` | data |
-| Fig 18 | `exp.viz.geoid_tracklong_samples out=figures/paper/13_GEOID-sample-full.pdf` | data, ckpt |
-| Fig 19 | `exp.viz.geoid_trackN per_position fixed=cont cp=1 ks=4,8,12,16,20,24,28,31 out=figures/paper/12_GEOID-per-position.pdf` | data |
-| Fig 20 | `exp.viz.paper.datasets` | data |
-| Table 1 | `exp.viz.token_counts_table` | |
-| Tables 2, 3 | `exp.viz.selector_tables_r1` | |
-| Table 4 | `exp.viz.oneway_cost_table` | |
-| Tables 6, 7, 8 | `exp.viz.oneway_probe_tables` | |
-| Table 11 | `exp.viz.dataset_splits_table` | data |
-| App. K numbers | `exp.viz.geoid_k_numbers` | |
+| `s2` | (frames, 10, H, W) | Sentinel-2 L2A bands `B02 B03 B04 B05 B06 B07 B08 B8A B11 B12`, surface reflectance x 10,000 (no BOA offset) |
+| `s1` | (frames, 2, H, W) | Sentinel-1 `VV VH` backscatter in dB (the model was trained on ascending passes) |
+| `s2_dates`, `s1_dates` | one per frame | `datetime.date`, `"YYYY-MM-DD"` or `numpy.datetime64` |
+| `start` | | the first of 12 months; frames outside them are ignored |
+| `s2_valid`, `s1_valid` | (frames, H, W) bool, optional | `False` at pixels to leave out of the monthly means |
 
-Outputs go to `figures/paper/`. Regenerated from `results/`, they match the paper's figures pixel
-for pixel and its tables byte for byte.
+Pixels are at 10 m. `prepare` averages each modality's frames per calendar month, averages the
+months into four 3-month seasons, and normalizes both with OlmoEarth's statistics. It then cuts the
+image into 64 x 64 px tiles, padding the bottom and right edges. `predict` runs the tiles in
+batches and stitches the result back to H x W. A month with no valid frame in a modality is
+treated as missing.
 
-The results themselves:
+**Budget.** `budget` is the share of 4 x 4 px windows that get fine tokens, measured on the
+training distribution. A fixed threshold on the coarse prediction's uncertainty, shipped with the
+weights, decides which windows; so an image with more uncertain areas gets more fine tokens. The
+model was trained at 0.5, and lower budgets trade accuracy for compute (PASTIS test split, 1,984
+tiles):
 
-```shell
-python -m exp.mistr.paper_configs check                     # the 1,088 generated runs = the results rows
-python -m exp.mistr.paper_runs list --tasks pastis          # the training runs, in order
-python -m exp.mistr.paper_runs show <run name>              # one run's full config
-python -m exp.mistr.paper_runs train --tasks pastis --match '^fixed_'
-python -m exp.mistr.paper_runs slurm --tasks pastis > submit.sh   # or one job per run
-python -m exp.paper_evals > evals.sh                         # probes, costs, throughput, Tessera, GEOID-Flood
-```
+| budget | test mIoU | fine tokens / tile |
+|---|---|---|
+| 0.5 (trained) | 57.29 | 1,517 |
+| 0.4 | 56.93 | 1,219 |
+| 0.3 | 56.39 | 919 |
+| 0.25 | 56.06 | 770 |
+| 0.2 | 55.67 | 620 |
+| 0.15 | 54.94 | 469 |
+| 0.1 | 53.84 | 318 |
+| 0.05 | 52.57 | 164 |
+| 0 (coarse pass only) | 50.60 | 0 |
 
-Each training run appends its row to `results/<task>/mistr.csv` and saves `checkpoints/<run>.pt`.
-Expect about 1-3 GPU-hours per Tiny run on one L40S (PLANTEUR and YieldSAT read faster with the
-composite caches; `docs/DATA.md`).
+Each 64 px tile always costs 1,024 coarse tokens: 4 seasons x 64 patches x 4 token groups (3
+Sentinel-2 band groups and Sentinel-1). A selected window adds 4 fine tokens for each month of its
+selected season.
 
-## Licence
+## The released model
 
-Code: Apache-2.0 (`LICENSE`). Released checkpoints are fine-tuned from OlmoEarth weights and are
-distributed under the OlmoEarth Artifact License, including its use restrictions (`MODEL_LICENSE.md`).
-Vendored code and datasets keep their own licences (`NOTICE`).
+`TimZhou/mistr-olmoearth-tiny-pastis`: OlmoEarth-v1-Tiny, fine-tuned for crop-type segmentation on
+[PASTIS-R](https://github.com/VSainteuf/pastis-benchmark): 19 classes, agricultural parcels in
+France, October 2018 to September 2019, trained on folds 1-3. It reaches 57.3 test mIoU (fold 5)
+at budget 0.5, the configuration called S8 seasonal + S4 monthly in the paper. On other regions,
+years or crop types, expect to fine-tune: see `paper/` for the training code.
+
+Results can differ in the last bf16 bits with the batch size (`predict(..., batch_size=)`), which
+flips the class of very few pixels.
+
+## Reproducing the paper
+
+[`paper/README.md`](paper/README.md): installation, datasets, every training run as code,
+and the command behind every figure and table.
 
 ## Citation
 
@@ -127,3 +110,9 @@ Vendored code and datasets keep their own licences (`NOTICE`).
   year   = {2026},
 }
 ```
+
+## Licence
+
+Code: Apache-2.0 (`LICENSE`). The released weights are fine-tuned from OlmoEarth and are
+distributed under the OlmoEarth Artifact License, including its use restrictions
+(`MODEL_LICENSE.md`). Third-party code and data keep their own licences (`NOTICE`).

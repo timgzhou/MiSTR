@@ -5,42 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mistr"
 version = "0.1.0"
-description = "MiSTR: mixed spatiotemporal resolution for remote-sensing foundation models"
+description = "MiSTR: adaptively mixing spatiotemporal resolution for satellite image time series"
+readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.12"
-# What mistr/, exp/ and the vendored AnyUp import (versions the paper's runs used; exact pins:
-# requirements-lock.txt).
 dependencies = [
-    "torch==2.9.1",
-    "torchvision==0.24.1",
-    "olmoearth-pretrain[training]==0.1.2",   # [training] = olmo-core, which its eval modules import
-    "numpy",
+    "torch>=2.4",
+    "olmoearth-pretrain==0.1.2",
     "einops",
-    "scipy",
-    "pandas",
-    "matplotlib",
-    "pillow",
-    "rasterio",        # GEOID-Flood, PLANTEUR, BioMassters GeoTIFFs; S1 series fetch
-    "affine",
-    "h5py",            # YieldSAT store
-    "tacoreader",      # BioMassters (GeoBench-v2 tortilla shards)
-    "pyyaml",
+    "numpy",
+    "safetensors",
+    "huggingface_hub",
 ]
 
 [project.optional-dependencies]
-# OlmoEarth's varlen FlashAttention: needed for every batch with missing tokens (SDPA refuses them);
-# built against torch, so: pip install --no-build-isolation -e ".[flash]"
-# (mistr/encoders/olmoearth.py). Training and the paper's numbers use it.
-flash = ["flash-attn==2.8.3"]
-dev = ["pytest", "ruff"]
+# varlen FlashAttention (CUDA GPU): required to run the model. Prebuilt wheels match a torch /
+# CUDA / Python combination; see README.
+flash = ["flash-attn>=2.6"]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["mistr*", "exp*", "third_party*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-
-[tool.ruff]
-line-length = 110
+[tool.setuptools]
+packages = ["mistr"]
