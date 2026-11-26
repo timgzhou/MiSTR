@@ -1,0 +1,5 @@
+run,attention,gmacs,gmacs_attention,gmacs_analytic,tokens_per_block,longest_sequence,compute_samples,compute_crops_per_sample
+mistr_pastis_S8Tsea+S4Tmon_q25_woracle50_ep100_seed0_e7b6f835,coarse_pass_only,10.372,4.832,,,,,
+mistr_pastis_S8Tsea+S4Tmon_q25_woracle50_ep100_seed0_e7b6f835,one_way,22.907,12.721,0.0,1871.7,3208.0,256.0,211.9
+mistr_pastis_S8Tsea+S4Tmon_q25_woracle50_ep100_seed0_e7b6f835,fine_reads_coarse,18.268,8.832,0.0,1871.7,1024.0,256.0,211.9
+mistr_pastis_S8Tsea+S4Tmon_q25_woracle50_ep100_seed0_e7b6f835,joint,37.174,21.552,0.0,2895.7,3208.0,256.0,211.9

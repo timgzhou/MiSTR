@@ -1,0 +1,55 @@
+# data
+# Every command the paper's numbers, figures and tables come from (python -m <module>).
+exp.baselines.best_lr
+exp.baselines.calibrate_apt
+exp.baselines.eval_upa
+exp.bench.mistr_crop_spread
+exp.bench.mistr_throughput
+exp.common.build_tile_store
+exp.demo
+exp.geoidchange.series_manifest
+exp.geoidchange.tilecache
+exp.geoidchange.tileseries_cache
+exp.geoidchange.tileseries_fetch
+exp.geoidchange.tiletrack
+exp.geoidchange.tiletrack_flops
+exp.geoidchange.trackN_rescore
+exp.mistr.build_cache
+exp.mistr.eval_input_mask
+exp.mistr.measure_test_cost
+exp.mistr.mech_probe
+exp.mistr.oneway_cost
+exp.mistr.paper_configs
+exp.mistr.paper_runs
+exp.mistr.train
+exp.paper_evals
+exp.tessera.embed
+exp.tessera.head
+exp.tessera.pooltune
+exp.viz.baselines_r1
+exp.viz.dataset_splits_table
+exp.viz.geoid_cutmix_long_example
+exp.viz.geoid_k_numbers
+exp.viz.geoid_tracklong_paper
+exp.viz.geoid_tracklong_samples
+exp.viz.geoid_trackN
+exp.viz.oneway_attn_trained
+exp.viz.oneway_cost_table
+exp.viz.oneway_probe_tables
+exp.viz.paper.datasets
+exp.viz.paper.method_parts
+exp.viz.paper.oneway_layers
+exp.viz.per_sample_compute
+exp.viz.round1_main
+exp.viz.round1_main_std
+exp.viz.round1_throughput
+exp.viz.season_range_tradeoff
+exp.viz.selector_gallery_r1
+exp.viz.selector_tables_r1
+exp.viz.space_time_ablation
+exp.viz.terramind_tradeoff
+exp.viz.tessera_frozen_tradeoff
+exp.viz.token_counts_table
+exp.yieldsat.prepare
+# figures / tables
+# training / evaluation

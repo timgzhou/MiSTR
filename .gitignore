@@ -1,0 +1,17 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+/data/
+/cache/
+/checkpoints/
+/logs/
+/pretrained/
+*.lock
+# local links to the data / pretrained weights (see docs/DATA.md)
+/data
+/pretrained
+/figures/
+/checkpoints
+/demo/*.npz
+/notebooks/.ipynb_checkpoints/

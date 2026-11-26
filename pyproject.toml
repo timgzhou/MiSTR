@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mistr"
+version = "0.1.0"
+description = "MiSTR: mixed spatiotemporal resolution for remote-sensing foundation models"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.12"
+# What mistr/, exp/ and the vendored AnyUp import (versions the paper's runs used; exact pins:
+# requirements-lock.txt).
+dependencies = [
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "olmoearth-pretrain[training]==0.1.2",   # [training] = olmo-core, which its eval modules import
+    "numpy",
+    "einops",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "pillow",
+    "rasterio",        # GEOID-Flood, PLANTEUR, BioMassters GeoTIFFs; S1 series fetch
+    "affine",
+    "h5py",            # YieldSAT store
+    "tacoreader",      # BioMassters (GeoBench-v2 tortilla shards)
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# OlmoEarth's varlen FlashAttention: needed for every batch with missing tokens (SDPA refuses them);
+# built against torch, so: pip install --no-build-isolation -e ".[flash]"
+# (mistr/encoders/olmoearth.py). Training and the paper's numbers use it.
+flash = ["flash-attn==2.8.3"]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mistr*", "exp*", "third_party*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110

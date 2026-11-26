@@ -1,0 +1,68 @@
+{
+ "demo/pastis_test_samples.npz": {
+  "sha256": "eddb8e505f7b105f2b6088b1b6946a6e227dce5a2bf02354e3caa7e42c001c95",
+  "bytes": 7993258,
+  "what": "8 PASTIS-R test tiles as the test-time loader composites them (exp.demo export)",
+  "source": "PASTIS-R (Garnot et al.), CC BY 4.0"
+ },
+ "demo/geoid_test_series.npz": {
+  "sha256": "e94374ff7e71062bd5a87dc0e077f17c355fe8cf53451c1f867dfad8c1a475f7",
+  "bytes": 64419882,
+  "what": "2 GEOID-Flood test series (EMSR417-1-5_q2, EMSR456-5-2_q0), S1 RTC VV/VH + labels (exp.demo export_geoid)",
+  "source": "GEOID-Flood labels CC BY 4.0; contains modified Copernicus Sentinel-1 data; Copernicus EMS Rapid Mapping products, (c) European Union"
+ },
+ "checkpoints/mistr_pastis_S8Tsea+S4Tmon_q50_woracle50_ep100_seed0_9a7509fd.pt": {
+  "sha256": "beda81a64e29855bbc172134165d01457402bfaa267bf1c3283bcf0257c8f90b",
+  "bytes": 25842767,
+  "what": "model weights (demo + Fig 16)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/geoidchange/trkO_128c32_qr_s0.pt": {
+  "sha256": "e71ebd4cfb90dc85c8756c4c613e5ece397d0d9a5a2e6821353c747a4955074a",
+  "bytes": 25502083,
+  "what": "model weights (demo + Figs 06/13)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/geoidchange/trkO_fix128_cont_s0.pt": {
+  "sha256": "f3e468da33e23f25dd7460bd860117178dcf1c008b33ae0274240345702a2612",
+  "bytes": 25502561,
+  "what": "model weights (demo + Fig 13)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/geoidchange/trkO_fix32_cont_s0.pt": {
+  "sha256": "6c2fa91bbaefc179b63eee353a8ef48e4d86f88a4bceb59430d340ffa86fc720",
+  "bytes": 25502322,
+  "what": "model weights (demo + Fig 13)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/geoidchange/trkO_fix128_s0.pt": {
+  "sha256": "64a74eefcfb7c0c19f81365828c528af6cea9489441b6103fa01246382c5c4a2",
+  "bytes": 25501366,
+  "what": "model weights (Fig 06)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/geoidchange/trkO_fix32_s0.pt": {
+  "sha256": "1324271bed98fe7185e9ef0a731e88110f9523008950942756c11f4442fe5981",
+  "bytes": 25501127,
+  "what": "model weights (Fig 06)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/mistr_planteur_S8Tsea+S4Tmon_q50_woracle50_ep100_seed0_d1a766f7.pt": {
+  "sha256": "2545a96ac91d0d638ce7ddb22b143cbf8cf8f7f7c82f87f3a4685190b3be5cb4",
+  "bytes": 25299833,
+  "what": "model weights (Fig 16)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/mistr_biomassters_S8Tsea+S4Tmon_q50_woracle10_ep20_seed0_3107fc40.pt": {
+  "sha256": "eca69fb2d26e70ab64fa45d38bcd6994fbd4adba881299292503ed584e47d28c",
+  "bytes": 24954467,
+  "what": "model weights (Fig 16, Fig 26)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ },
+ "checkpoints/mistr_yieldsat_raw_S8Tsea+S4Tmon_q50_woracle50_ep100_seed0_acff4ce6.pt": {
+  "sha256": "e840b62eae074b6ac8bf4c5f61540bba681939f171946e810a2eda8b4ed17f78",
+  "bytes": 24955213,
+  "what": "model weights (Fig 16)",
+  "source": "fine-tuned from OlmoEarth v1 Tiny: OlmoEarth Artifact License (cite Ai2; use restrictions apply)"
+ }
+}

@@ -1,0 +1,81 @@
+"""Pieces of the trainers that are easy to get
+silently wrong: the heads' time reductions and pixel layout, the meters' arithmetic, and the
+UTAE packing of non-PASTIS data."""
+import torch
+
+from exp.common.heads import Pa2PxHead, time_mean
+from exp.common.metrics import RegMeter, SegMeter
+
+
+def test_time_mean_ignores_missing_steps():
+    tok = torch.stack([torch.full((2, 2, 3), v) for v in (1.0, 100.0, 3.0)]).unsqueeze(0)
+    out = time_mean(tok, torch.tensor([[True, False, True]]))
+    assert torch.all(out == 2.0)
+
+
+def test_pa2px_unfolds_each_token_to_its_own_patch():
+    head = Pa2PxHead("time_mean", embed_dim=2, num_outputs=1, patch_size=2)
+    with torch.no_grad():
+        head.linear.weight.zero_()
+        head.linear.bias.copy_(torch.tensor([0.0, 1.0, 2.0, 3.0]))   # sub-pixel (i, j) = 2i + j
+        head.linear.weight[:, 0] = 10.0                                 # + 10 * token value
+    tok = torch.tensor([[0.0, 1.0], [2.0, 3.0]]).view(1, 1, 2, 2, 1).repeat(1, 1, 1, 1, 2)
+    tok[..., 1] = 0
+    out = head(tok, torch.ones(1, 1, dtype=torch.bool))[0, 0]          # (4, 4)
+    for gh in range(2):
+        for gw in range(2):
+            patch = out[2 * gh:2 * gh + 2, 2 * gw:2 * gw + 2]
+            assert torch.equal(patch, 10 * tok[0, 0, gh, gw, 0] + torch.tensor([[0., 1.], [2., 3.]]))
+
+
+def test_diff_head_is_post_minus_pre():
+    head = Pa2PxHead("diff", embed_dim=3, num_outputs=2, patch_size=1)
+    pre, post = torch.randn(1, 1, 4, 4, 3), torch.randn(1, 1, 4, 4, 3)
+    out = head(torch.cat([pre, post], 1), torch.ones(1, 2, dtype=torch.bool))
+    want = head(torch.cat([torch.zeros_like(pre), post - pre], 1), torch.ones(1, 2, dtype=torch.bool))
+    assert torch.allclose(out, want, atol=1e-6)
+
+
+def test_seg_meter_headline_and_ignore():
+    m = SegMeter(3, ("a", "b", "c"), headline=(0, 2))
+    target = torch.tensor([[[0, 1, 2, -1]]])
+    logits = torch.nn.functional.one_hot(torch.tensor([[[0, 2, 2, 1]]]), 3).permute(0, 3, 1, 2).float()
+    m.update(logits, target)
+    r = m.compute()
+    assert abs(r["iou_a"] - 1) < 1e-6 and r["iou_b"] == 0.0 and abs(r["iou_c"] - 0.5) < 1e-6
+    assert abs(r["primary"] - 0.75) < 1e-6          # ignored pixel (-1 -> predicted 1) not counted
+
+
+def test_reg_meter_reports_in_target_units():
+    m = RegMeter(scale=10.0)
+    m.update(torch.tensor([[[[1.0, 3.0]]]]), torch.tensor([[[0.0, 1.0]]]))   # errors 1, 2
+    r = m.compute()
+    assert abs(r["rmse"] - 10 * (2.5 ** 0.5)) < 1e-4 and abs(r["mae"] - 15.0) < 1e-4
+
+
+def test_normalized_head_standardizes_channels_then_stays_linear():
+    head = Pa2PxHead("time_mean", embed_dim=3, num_outputs=2, patch_size=1, norm=True)
+    torch.manual_seed(0)        # scales >> sqrt(BatchNorm eps) = 3e-3, like real features
+    tok = torch.randn(8, 1, 4, 4, 3) * torch.tensor([100.0, 0.1, 1.0]) + 5
+    fv = torch.ones(8, 1, dtype=torch.bool)
+    head.train()
+    head(tok, fv)
+    x = head.norm(tok[:, 0].flatten(0, 2))                  # train mode: batch statistics
+    assert torch.allclose(x.mean(0), torch.zeros(3), atol=1e-4)     # float32 at offset 5
+    assert torch.allclose(x.std(0, unbiased=False), torch.ones(3), atol=1e-3)
+    head.eval()                                             # eval: fixed affine map
+    a, b = head(tok[:1], fv[:1]), head(2 * tok[:1], fv[:1])
+    zero = head(torch.zeros_like(tok[:1]), fv[:1])
+    assert torch.allclose(b - zero, 2 * (a - zero), atol=1e-4)
+
+
+def test_csv_append_widens_the_header(tmp_path):
+    import csv
+    from exp.common.runlog import _append
+    p = tmp_path / "r.csv"
+    _append(p, {"a": 1, "b": 2})
+    _append(p, {"a": 3, "c": 4})
+    _append(p, {"b": 5})
+    rows = list(csv.DictReader(open(p)))
+    assert list(rows[0]) == ["a", "b", "c"]
+    assert [tuple(r.values()) for r in rows] == [("1", "2", ""), ("3", "", "4"), ("", "5", "")]

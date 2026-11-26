@@ -1,0 +1,2 @@
+run,task,model_size,samples_traced,gmacs,gmacs_attention,gmacs_other,tokens_per_block,longest_sequence,crops_per_sample,samples_s,peak_mem_gb
+inject_fft_planteur_tiny_none_native_set_lrps2_lr0.001_ep50,planteur,tiny,8,1326.24,1236.951,89.289,16384.0,16384,0.0,,

@@ -1,0 +1,387 @@
+"""Train a MiSTR model, a fixed-resolution model or a baseline (mistr.core).
+
+    python -u -m exp.mistr.train --config run.json train.seed=1 train.max_hours=2.5
+
+Each step: the selector reads the batch (and the model's own coarse pass) and returns a plan;
+the model encodes the coarse tokens with the plan's windows; loss = the task loss. Resumable
+per epoch (checkpoints/<name>_state.pt; train.max_hours for chains
+of short jobs). The best-val epoch is tested -> checkpoints/<name>.pt (config + weights) and a
+row of results/<task>/mistr.csv. Training schedule (OlmoEarth's fine-tuning recipe): a warm
+start trains its loaded weights at lr x 0.1 and new modules at lr; a cold start freezes the
+backbone for the first 20% of the epochs; ReduceLROnPlateau on the val metric.
+"""
+from exp.common import olmo_bootstrap  # noqa: F401
+olmo_bootstrap.apply()
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import math  # noqa: E402
+import os  # noqa: E402
+import time  # noqa: E402
+from dataclasses import replace  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import torch  # noqa: E402
+from torch import nn  # noqa: E402
+from torch.optim.lr_scheduler import ReduceLROnPlateau  # noqa: E402
+
+from exp.common.tasks import TASKS  # noqa: E402
+from exp.common.runlog import (FREEZE_EPOCH_FRACTION, SCHEDULER_COOLDOWN,  # noqa: E402
+                                 SCHEDULER_FACTOR, SCHEDULER_PATIENCE, UNFREEZE_LR_FACTOR,
+                                 _append, _brief)
+from mistr.core import load_weights  # noqa: E402
+from mistr.baselines import build_model, build_selector_for  # noqa: E402
+from mistr.core.config import ENCODER_ATTN, RunConfig, apply_overrides, load  # noqa: E402
+from mistr.core.data_cpu import loader  # noqa: E402
+from mistr.core.selection import (CoarsePass, WindowSelector, build_selector,  # noqa: E402
+                                    build_warmup)
+
+
+def n_crops(plan) -> int:
+    return sum(len(p) for p in plan) if isinstance(plan, list) else len(plan)
+
+
+def step(model, selector, batch):
+    """One batch -> (logits, auxiliary loss or None, crops)."""
+    ctx = CoarsePass.from_batch(model, batch)
+    sel = selector(ctx)
+    reuse = not model.training and not torch.is_grad_enabled()    # inference: embed once
+    if reuse and ctx.coarse_tokens is not None and n_crops(sel.plan) == 0:
+        return ctx.out0.prediction, sel.aux, 0      # no windows: the coarse pass IS the output
+    out = model(batch.ms, batch.ss, batch.season, batch.present, sel.plan, sel.logw,
+                batch.dates, ctx.coarse_tokens if reuse else None, ctx.coarse_cache if reuse else None)
+    plan = sel.plan
+    if model.cfg.crop_time == "season":     # the model encodes one crop per (window, season)
+        plan = ([p.per_season(batch.season.to(p.b.device)) for p in plan] if isinstance(plan, list)
+                else plan.per_season(batch.season.to(plan.b.device)))
+    return out.prediction, sel.aux, n_crops(plan)
+
+
+@torch.no_grad()
+def evaluate(model, selector, task, dl, limit=0):
+    model.eval()
+    for m in selector.modules():
+        m.eval()
+    meter, crops, n = task.meter(), 0, 0
+    for i, batch in enumerate(dl):
+        if limit and i >= limit:
+            break
+        logits, _, nc = step(model, selector, batch)
+        meter.update(logits, batch.target.cuda())
+        crops, n = crops + nc, n + batch.target.shape[0]
+    return meter.compute(), crops / max(n, 1)
+
+
+@torch.no_grad()
+def val_threshold(model, selector, dl, limit=0) -> bool:
+    """The window selector (where uncertainty): replace its threshold table (the training
+    batches' EMA) by the val split's quantiles of the same uncertainty, so the test set gets ~q
+    of its windows (the model is more certain on its training set: the training table sits low
+    and over-crops held-out tiles). -> whether it applied."""
+    if not isinstance(selector, WindowSelector) or selector.cfg.where != "uncertainty":
+        return False
+    model.eval()
+    u = []
+    for i, batch in enumerate(dl):
+        if limit and i >= limit:
+            break
+        ctx = CoarsePass.from_batch(model, batch)
+        u.append(selector.threshold_values(ctx).float().cpu())
+    u = torch.cat(u)
+    u = u[torch.randperm(len(u))[:4_000_000]]
+    lv = torch.linspace(0, 1, selector.state.LEVELS)
+    selector.state.tab_s.copy_(torch.quantile(u, lv).to(selector.state.tab_s.device))
+    if selector.extra:          # the extra steps' table, under the new tab_s
+        v, ratios = [], []
+        for i, batch in enumerate(dl):
+            if limit and i >= limit:
+                break
+            x, ratio = selector.extra_values(CoarsePass.from_batch(model, batch))
+            v.append(x.cpu())
+            ratios.append(ratio)
+        v = torch.cat(v)
+        v = v[torch.randperm(len(v))[:4_000_000]] if len(v) else torch.zeros(1)
+        selector.state.tab_x.copy_(torch.quantile(v, lv).to(selector.state.tab_x.device))
+        selector.state.ratio_x.fill_(sum(ratios) / len(ratios))
+    return True
+
+
+@torch.no_grad()
+def measure_compute(model, selector, dl, batches: int) -> dict:
+    """Inference cost per sample over the first `batches` batches of dl, everything the arm runs
+    at test time (the selector's passes, the crops, the decoder): exp.bench.flop_trace."""
+    from exp.bench.flop_trace import count_macs
+    model.eval()
+    for m in selector.modules():
+        m.eval()
+    n_samples = crops = 0
+    with count_macs() as count:
+        for i, batch in enumerate(dl):
+            if i >= batches:
+                break
+            crops += step(model, selector, batch)[2]
+            n_samples += batch.target.shape[0]
+    n_blocks = len(model.mix.encoder.blocks)
+    return {"gmacs": round(count.total / n_samples / 1e9, 3),
+            "gmacs_attention": round(count.attn / n_samples / 1e9, 3),
+            "gmacs_analytic": round(count.analytic / n_samples / 1e9, 3),
+            "tokens_per_block": round(count.token_blocks / n_samples / n_blocks, 1),
+            "longest_sequence": count.max_seq, "compute_samples": n_samples,
+            "compute_crops_per_sample": round(crops / n_samples, 1)}
+
+
+def test_cost(model, selector, dl) -> dict:
+    """measure_compute over every batch of the test split -> gmacs_test, tokens_test,
+    crops_test (the cost the figures plot)."""
+    c = measure_compute(model, selector, dl, 10**9)
+    return {"gmacs_test": c["gmacs"], "gmacs_attention_test": c["gmacs_attention"],
+            "tokens_per_block_test": c["tokens_per_block"],
+            "crops_per_sample_test": c["compute_crops_per_sample"]}
+
+
+def flat(d: dict, pre: str = "") -> dict:
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.update(flat(v, f"{pre}{k}."))
+        else:
+            out[f"{pre}{k}"] = v
+    return out
+
+
+def set_attn(model, attention: str):
+    """Switch who attends to whom (config.ATTENTION; the weights are shared by every mode)."""
+    model.mix.attn = ENCODER_ATTN[attention]
+    model.cfg = replace(model.cfg, attention=attention)
+
+
+def warmup_selector(cfg: RunConfig, model=None):
+    """The warm-up's selector: train.warmup_windows windows of the window lattice per sample,
+    by the label oracle (train.warmup oracle) or at random, every present month; or (select) the
+    run's own selector with where = label oracle (its budget, its "when")."""
+    if cfg.train.warmup == "select":
+        return build_selector(replace(cfg.select, where="oracle"), cfg.model.window_px, model)
+    return build_warmup(cfg.train.warmup, cfg.model.window_px, cfg.train.warmup_windows)
+
+
+def run(cfg: RunConfig) -> dict:
+    task = TASKS[cfg.task]
+    cfg.check(task.kind)
+    tc = cfg.train
+    name = cfg.name()
+    smoke = "_smoke" if tc.limit_batches else ""
+    state_path = Path(f"checkpoints/{name}{smoke}_state.pt")
+    if state_path.exists() and torch.load(state_path, weights_only=False).get("done"):
+        print(f"{state_path} says this run is finished; nothing to do")
+        return {}
+    torch.manual_seed(tc.seed)
+    model = build_model(task, cfg).cuda()
+    if tc.init_from:
+        unused = load_weights(model, tc.init_from)
+        print(f"warm start from {tc.init_from} (unused keys: {len(unused)})")
+        model.mix.hr_type.data.zero_()      # (a checkpoint trained with a fine-token embedding: dropped)
+    bs = tc.batch_size or task.batch_size[16]
+    if tc.gpu_data:
+        from mistr.core.data import gpu_loader
+        dl = {s: gpu_loader(task, s, bs, tc.num_workers, s == "train")
+              for s in ("train", "val", "test")}
+    else:
+        dl = {s: loader(task, s, bs, tc.num_workers, s == "train")
+              for s in ("train", "val", "test")}
+    b0 = next(iter(dl["val"]))
+    example = (b0.ms, b0.ss)
+    selector = build_selector_for(task, cfg, model, example)
+    nets = nn.ModuleList(selector.modules())
+    print(f"run {name}\n  {json.dumps(cfg.to_dict())}", flush=True)
+
+    better = task.meter().higher_is_better
+    if tc.freeze_model:     # only the selector's networks learn; the model stays as loaded
+        model.requires_grad_(False)
+        if tc.epochs and not len(nets):
+            raise ValueError("train.freeze_model with epochs > 0: the selector has nothing to train")
+    S1 = tc.warmup_epochs if tc.warmup != "none" else 0     # warm-up: epochs [0, S1)
+    oracle = warmup_selector(cfg, model) if S1 else None
+    stage_attn = lambda e: tc.warmup_attention if e < S1 else cfg.model.attention  # noqa: E731
+
+    def make_opt(warm: bool):
+        if tc.freeze_model:
+            opt = torch.optim.AdamW(list(nets.parameters()) or [torch.zeros(1)],
+                                    lr=tc.lr)
+        elif warm:          # loaded weights at the fine-tune rate, new modules at the full rate
+            own = [p for k, p in model.named_parameters()   # a baseline's new modules
+                   if model.new_modules and k.startswith(model.new_modules)]
+            ids = {id(p) for p in own}
+            groups = [{"params": [p for p in model.parameters() if id(p) not in ids],
+                       "lr": tc.lr * UNFREEZE_LR_FACTOR}]
+            if own or any(True for _ in nets.parameters()):
+                groups.append({"params": own + list(nets.parameters()), "lr": tc.lr})
+            opt = torch.optim.AdamW(groups)
+        else:
+            opt = torch.optim.AdamW(list(model.parameters()) + list(nets.parameters()),
+                                    lr=tc.lr)
+        return opt, ReduceLROnPlateau(opt, mode="max" if better else "min",
+                                      factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE,
+                                      cooldown=SCHEDULER_COOLDOWN)
+
+    freeze_epochs = (tc.epochs if tc.head_only else 0 if tc.init_from
+                     else math.ceil(FREEZE_EPOCH_FRACTION * (S1 or tc.epochs)))
+    loss_fn = task.loss().cuda()
+    backbone = model.mix.encoder
+
+    def state():
+        return {"model": model.state_dict(), "selector": nets.state_dict()}
+
+    start, hours_before, epoch_s = 0, 0.0, None
+    best, best_epoch, best_val, best_state = None, -1, None, None
+    if state_path.exists():
+        st = torch.load(state_path, map_location="cpu", weights_only=False)
+        start = st["epoch"]
+    opt, sched = make_opt((bool(tc.init_from) and not tc.head_only) or bool(S1 and start > S1))   # (= S1: the loop restarts it)
+    set_attn(model, stage_attn(start))
+    if state_path.exists():
+        model.load_state_dict(st["model"]["model"])
+        nets.load_state_dict(st["model"]["selector"])
+        opt.load_state_dict(st["opt"])
+        sched.load_state_dict(st["sched"])
+        start, hours_before, epoch_s = st["epoch"], st["hours"], st["epoch_s"]
+        best, best_epoch, best_val, best_state = (st["best"], st["best_epoch"], st["best_val"],
+                                                  st["best_state"])
+        print(f"resumed from {state_path} after epoch {start}")
+    t_start = time.time()
+
+    for epoch in range(start, tc.epochs):
+        if tc.max_hours and epoch_s and (time.time() - t_start + 1.1 * epoch_s) / 3600 > tc.max_hours:
+            print(f"STOPPED before epoch {epoch + 1} (train.max_hours); rerun to resume")
+            return {}
+        if S1 and epoch == S1:      # stage 2: the configured selector, a warm restart
+            opt, sched = make_opt(True)
+            set_attn(model, cfg.model.attention)
+            print(f"epoch {epoch + 1}: warm-up over (selector {cfg.select.where} x "
+                  f"{cfg.select.when}, attention {cfg.model.attention}), optimizer restarted, "
+                  f"lr {tc.lr * UNFREEZE_LR_FACTOR:g}", flush=True)
+        active = oracle if S1 and epoch < S1 else selector
+        e0 = time.time()
+        torch.manual_seed(tc.seed + epoch)
+        tuning = epoch >= freeze_epochs and not tc.freeze_model
+        backbone.requires_grad_(tuning)
+        if epoch == freeze_epochs and not tc.init_from:  # (never under head_only)
+            for g in opt.param_groups:
+                g["lr"] = tc.lr * UNFREEZE_LR_FACTOR
+            print(f"epoch {epoch + 1}: backbone unfrozen, lr -> {tc.lr * UNFREEZE_LR_FACTOR:g}")
+        model.train(not tc.freeze_model)
+        backbone.train(tuning)
+        nets.train()
+        loss_sum, n, crops, samples = 0.0, 0, 0, 0
+        for i, batch in enumerate(dl["train"]):
+            if tc.limit_batches and i >= tc.limit_batches:
+                break
+            target = batch.target.cuda()
+            if tc.freeze_model:     # the selector's own loss only: no crop pass needed
+                sel = active(CoarsePass.from_batch(model, batch))
+                if sel.aux is None:
+                    raise ValueError("train.freeze_model: the selector gives no training loss")
+                loss, aux, nc = sel.aux, sel.aux, n_crops(sel.plan)
+            else:
+                logits, aux, nc = step(model, active, batch)
+                loss = loss_fn(logits, target)
+                if aux is not None:
+                    loss = loss + aux
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            loss_sum, n = loss_sum + loss.item(), n + 1
+            crops, samples = crops + nc, samples + target.shape[0]
+            if i % 100 == 0:
+                extra = "" if aux is None else f" | selector aux loss {aux.item():.4f}"
+                q = getattr(active, "last", None)
+                extra += "" if not q else " | " + " ".join(f"{k} {v:.3f}" for k, v in q.items())
+                print(f"  step {i}/{len(dl['train'])} loss {loss.item():.4f}{extra}", flush=True)
+        train_s = time.time() - e0
+        val, _ = evaluate(model, active, task, dl["val"], tc.limit_batches)
+        sched.step(val["primary"])
+        print(f"epoch {epoch + 1}/{tc.epochs} | {samples / train_s:.1f} samples/s "
+              f"({train_s / 60:.1f} min) | {crops / max(samples, 1):.0f} crops/sample | "
+              f"peak mem {torch.cuda.max_memory_allocated() / 2**30:.1f} GB\n"
+              f"   train_loss {loss_sum / max(n, 1):.4f} | val {_brief(val)}", flush=True)
+        if epoch < S1:              # stage 1 picks crops with the label: never the result
+            pass
+        elif best is None or (val["primary"] > best if better else val["primary"] < best):
+            best, best_epoch, best_val = val["primary"], epoch + 1, val
+            best_state = {k: {p: t.detach().cpu().clone() for p, t in v.items()}
+                          for k, v in state().items()}
+        epoch_s = time.time() - e0
+        tmp = state_path.with_suffix(".tmp")
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model": state(), "opt": opt.state_dict(), "sched": sched.state_dict(),
+                    "epoch": epoch + 1, "hours": hours_before + (time.time() - t_start) / 3600,
+                    "epoch_s": epoch_s, "best": best, "best_epoch": best_epoch,
+                    "best_val": best_val, "best_state": best_state}, tmp)
+        tmp.replace(state_path)
+
+    if best_state is None:
+        best_val, _ = evaluate(model, selector, task, dl["val"], tc.limit_batches)
+        best, best_epoch = best_val["primary"], tc.epochs
+        best_state = state()
+    model.load_state_dict(best_state["model"])
+    nets.load_state_dict(best_state["selector"])
+    thr = "val" if val_threshold(model, selector, dl["val"], tc.limit_batches) else ""
+    if thr:
+        best_state["selector"] = {k: v.detach().cpu().clone() for k, v in nets.state_dict().items()}
+    test, test_crops = evaluate(model, selector, task, dl["test"], tc.limit_batches)
+    hours = hours_before + (time.time() - t_start) / 3600
+    cost = measure_compute(model, selector, dl[tc.compute_split], tc.compute_batches)
+    # + the cost over the WHOLE test split (4 val batches put fixed monthly runs ~8%
+    # low -- the months present differ; MiSTR's crop share differs under the global threshold)
+    cost = {**cost, **test_cost(model, selector, dl["test"])}
+    print(f"TEST {name} (best val epoch {best_epoch}, val {best:.4f}): {_brief(test)} | "
+          f"{test_crops:.0f} crops/sample | {cost['gmacs']:.2f} GMACs/sample "
+          f"({cost['tokens_per_block']:.0f} tokens/block)", flush=True)
+    if not tc.limit_batches:
+        torch.save({"config": cfg.to_dict(), "model": best_state["model"],
+                    "selector": best_state["selector"]}, f"checkpoints/{name}.pt")
+    row = {"job": os.environ.get("SLURM_JOB_ID", ""), "run": name, **flat(cfg.to_dict()),
+           "batch_size": bs, "best_epoch": best_epoch, "hours": round(hours, 2)}
+    out = Path(f"results/{cfg.task}/mistr{smoke}.csv")
+    _append(out, {**row, "test_crops_per_sample": round(test_crops, 1), **cost,
+                  **({"test_threshold": thr} if thr else {}),
+                  **{f"val_{k}": round(v, 5) for k, v in best_val.items()},
+                  **{f"test_{k}": round(v, 5) for k, v in test.items()}})
+    if tc.eval_percentages:     # the same model at other budgets: thresholds refit on val each
+        if not isinstance(selector, WindowSelector):
+            raise ValueError("train.eval_percentages: MiSTR runs only")
+        q0 = selector.cfg
+        for b in tc.eval_percentages.split(","):
+            qv, tv = b.split(":")       # "q:0.5" = this run's own percentage, extra_steps 0.5
+            qs, tx = (q0.percentage if qv == "q" else float(qv)), float(tv)
+            selector.cfg = replace(q0, percentage=qs, extra_steps=tx)
+            thr = "val" if val_threshold(model, selector, dl["val"], tc.limit_batches) else ""
+            t, tcr = evaluate(model, selector, task, dl["test"], tc.limit_batches)
+            c = measure_compute(model, selector, dl[tc.compute_split], tc.compute_batches)
+            c = {**c, **test_cost(model, selector, dl["test"])}
+            print(f"TEST {name} @ percentage {qs} extra_steps {tx}: {_brief(t)} | {tcr:.0f} "
+                  f"crops/sample | {c['gmacs']:.2f} GMACs/sample", flush=True)
+            _append(out, {**row, "select.percentage": qs, "select.extra_steps": tx,
+                          "eval_percentage": b, "test_crops_per_sample": round(tcr, 1), **c,
+                          **({"test_threshold": thr} if thr else {}),
+                          **{f"test_{k}": round(v, 5) for k, v in t.items()}})
+        selector.cfg = q0
+    torch.save({"done": True}, state_path)
+    return {"val": best_val, "test": test, "crops": test_crops, "name": name, "cost": cost}
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--config", default="", help="a RunConfig JSON (as saved in a checkpoint)")
+    ap.add_argument("--run", default="", help="a paper run by name (exp.mistr.paper_configs)")
+    ap.add_argument("overrides", nargs="*", help="dotted key=value, e.g. select.n=16")
+    a = ap.parse_args(argv)
+    if a.run:
+        from exp.mistr.paper_configs import by_name
+        cfg = by_name()[a.run]
+    else:
+        cfg = load(a.config) if a.config else RunConfig()
+    return run(apply_overrides(cfg, a.overrides))
+
+
+if __name__ == "__main__":
+    main()

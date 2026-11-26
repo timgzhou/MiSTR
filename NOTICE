@@ -1,0 +1,31 @@
+MiSTR
+Copyright 2026 Tim G. Zhou, Anthony Fuller, Avery Ma, Geoff Pleiss, Evan Shelhamer. Licensed under the Apache License 2.0 (LICENSE).
+
+This repository includes or depends on the following third-party work.
+
+Vendored code
+- third_party/anyup: AnyUp (Wimmer et al., ICLR 2026), https://github.com/wimmerth/anyup at commit
+  351807a, licensed under CC BY 4.0 (third_party/anyup/LICENSE). Unmodified.
+- third_party/tessera/model.py: TESSERA (University of Cambridge, ucam-eo), https://github.com/ucam-eo/tessera
+  at commit a710e8a031c06e2184d94257f1fb55d2409aa266, MIT License (third_party/tessera/LICENSE).
+
+Reimplemented after (no code copied unless noted above)
+- Upsample Anything (CVPR 2026): https://github.com/seominseok0429/Upsample-Anything-A-Simple-and-Hard-to-Beat-Baseline-for-Feature-Upsampling, commit 3925146
+- vid-TLDR (CVPR 2024): https://github.com/mlvlab/vid-TLDR, commit 4a89723
+- APT (ICLR 2026): https://github.com/rccchoudhury/apt, commit 707337e
+
+Models (not redistributed except as noted)
+- OlmoEarth (Allen Institute for AI, Ai2): code and weights under the OlmoEarth Artifact License.
+  The released MiSTR checkpoints are derivatives of OlmoEarth v1 weights; see MODEL_LICENSE.md.
+- TerraMind 1.0 (IBM and ESA), Apache-2.0.
+- Tessera v2 (University of Cambridge), see its repository for the weights' terms.
+
+Datasets (not redistributed; demo samples hosted separately, see demo/MANIFEST.json)
+- PASTIS-R (Garnot et al.), CC BY 4.0.
+- PLANTEUR (Ai2), ODC-BY.
+- BioMassters (Nascetti et al.), via GeoBench-v2, CC BY 4.0.
+- YieldSAT (Miranda et al.), terms on https://yieldsat.github.io.
+- GEOID-Flood (LINKS Foundation), CC BY 4.0. Contains modified Copernicus Sentinel-1 data; Copernicus
+  Emergency Management Service Rapid Mapping products, (c) European Union.
+- Sentinel-1 RTC series fetched from Microsoft Planetary Computer: contains modified Copernicus
+  Sentinel data.
