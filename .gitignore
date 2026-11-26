@@ -11,3 +11,4 @@ __pycache__/
 /paper/pretrained
 /paper/figures/
 /paper/demo/*.npz
+/build/

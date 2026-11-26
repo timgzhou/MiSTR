@@ -19,8 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# varlen FlashAttention (CUDA GPU): required to run the model. Prebuilt wheels match a torch /
-# CUDA / Python combination; see README.
+# varlen FlashAttention 2 (Ampere or newer GPUs): used automatically when installed, as in the
+# paper; without it the model runs on PyTorch's attention. Prebuilt wheels match a torch / CUDA /
+# Python combination; see README.
 flash = ["flash-attn>=2.6"]
 
 [tool.setuptools]

@@ -44,9 +44,7 @@ def test_prepare_missing_month_and_valid_mask():
     assert not (x.months.sentinel2_l2a[0, 10:, :, 0].float() == m[:1, :1]).all()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
 def test_predict():
-    pytest.importorskip("flash_attn")
     from mistr import MiSTR
     try:
         model = MiSTR.from_pretrained("TimZhou/mistr-olmoearth-tiny-pastis")

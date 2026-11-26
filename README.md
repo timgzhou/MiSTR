@@ -19,24 +19,29 @@ This repository has two parts:
 
 ## Install
 
-A CUDA GPU and Python 3.12. The model runs on OlmoEarth's varlen FlashAttention, so
-`flash-attn` is required:
+Python 3.12; a GPU is optional. Try it in Colab first:
+<a href="https://colab.research.google.com/github/timgzhou/MiSTR/blob/main/notebooks/mistr_quickstart.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+(`notebooks/mistr_quickstart.ipynb`).
 
 ```shell
-pip install torch==2.9.1
 pip install "mistr @ git+https://github.com/timgzhou/MiSTR"
-pip install wheel packaging ninja psutil
-FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE pip install --no-build-isolation flash-attn==2.8.3   # prebuilt wheel
 ```
 
-Other torch versions work as long as a `flash-attn` wheel exists for that torch / CUDA / Python combination.
+That runs on CPU or any GPU with PyTorch's attention. On Ampere or newer GPUs, installing
+FlashAttention 2 makes the model use it automatically, which is how the paper ran (bit-identical to the
+paper's numbers; PyTorch's attention agrees with it on 99.7 % of pixels):
+
+```shell
+pip install wheel packaging ninja psutil
+FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE pip install --no-build-isolation flash-attn==2.8.3   # prebuilt wheel, torch 2.9
+```
 
 ## Quickstart
 
 ```python
 from mistr import MiSTR, prepare
 
-model = MiSTR.from_pretrained("TimZhou/mistr-olmoearth-tiny-pastis")   # downloads ~26 MB
+model = MiSTR.from_pretrained("TimZhou/mistr-olmoearth-tiny-pastis")   # downloads ~26 MB; GPU if there is one
 
 x = prepare(s2, s2_dates, s1, s1_dates, start="2018-10")   # one image's time series, any size
 out = model.predict(x, budget=0.5)

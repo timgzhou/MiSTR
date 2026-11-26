@@ -51,8 +51,10 @@ class Inputs:
         cut = lambda s: s._replace(**{k: v[i:j] for k, v in s.as_dict().items() if v is not None})  # noqa: E731
         return Inputs(cut(self.months), cut(self.seasons), self.season[i:j], self.present[i:j])
 
-    def to(self, device) -> "Inputs":
-        mv = lambda s: s._replace(**{k: v.to(device) for k, v in s.as_dict().items() if v is not None})  # noqa: E731
+    def to(self, device, dtype=None) -> "Inputs":
+        """On `device`; dtype: of the images and masks (timestamps stay integer)."""
+        cast = lambda k, v: v.to(device) if dtype is None or k == "timestamps" else v.to(device, dtype)  # noqa: E731
+        mv = lambda s: s._replace(**{k: cast(k, v) for k, v in s.as_dict().items() if v is not None})  # noqa: E731
         return Inputs(mv(self.months), mv(self.seasons), self.season.to(device),
                       self.present.to(device), self.grid, self.size)
 
@@ -136,7 +138,7 @@ def _tiles(a: torch.Tensor, H: int, W: int) -> torch.Tensor:
 
 @torch.no_grad()
 def prepare(s2, s2_dates, s1, s1_dates, start, s2_valid=None, s1_valid=None,
-            device="cuda") -> Inputs:
+            device=None) -> Inputs:
     """One image's time series -> its 64 px tiles as MiSTR inputs.
 
     s2          (F2, 10, H, W) Sentinel-2 L2A, bands S2_BANDS, reflectance x 1e4
@@ -149,6 +151,7 @@ def prepare(s2, s2_dates, s1, s1_dates, start, s2_valid=None, s1_valid=None,
                 trained on PASTIS's frames as given (no cloud mask; its -10000 nodata dates
                 included), so the default reproduces its training inputs.
     """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     starts = _month_starts(start)
     s2 = np.asarray(s2, np.float32)
     if s2.ndim != 4 or s2.shape[1] != len(S2_BANDS):

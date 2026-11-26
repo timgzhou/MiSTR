@@ -21,6 +21,7 @@ prediction needs more detail, and a sparse fine pass over monthly images at thos
 """
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,44 @@ def _cu(seqlens: torch.Tensor) -> torch.Tensor:
     return F.pad(torch.cumsum(seqlens, 0, dtype=torch.int32), (1, 0))
 
 
+def flash_available(device) -> bool:
+    """FlashAttention 2: installed and an Ampere or newer GPU."""
+    if torch.device(device).type != "cuda":
+        return False
+    try:
+        import flash_attn  # noqa: F401
+    except ImportError:
+        return False
+    return torch.cuda.get_device_capability(device) >= (8, 0)
+
+
+def varlen_attention(q, k, v, cu_q, cu_k, max_q: int, max_k: int, scale: float, flash: bool):
+    """Attention over packed sequences: q (Nq, heads, d), k / v (Nk, heads, d), sequence i
+    = rows cu[i]:cu[i + 1] -> (Nq, heads, d). flash: FlashAttention's varlen kernel (how the
+    paper ran); else PyTorch SDPA on the sequences padded, padding masked out of the keys."""
+    if flash:
+        import flash_attn
+        return flash_attn.flash_attn_varlen_func(q, k.to(q.dtype), v.to(q.dtype), cu_q, cu_k,
+                                                 max_q, max_k, softmax_scale=scale)
+    cu_q, cu_k = cu_q.long(), cu_k.long()
+    S, dev = len(cu_q) - 1, q.device
+    n_q, n_k = cu_q.diff(), cu_k.diff()
+
+    def pad(x, cu, n, L):
+        seq = torch.repeat_interleave(torch.arange(S, device=dev), n)
+        pos = torch.arange(len(x), device=dev) - cu[seq]
+        out = x.new_zeros((S, L) + x.shape[1:])
+        out[seq, pos] = x
+        return out.transpose(1, 2), seq, pos                      # (S, heads, L, d)
+
+    Q, sq, pq = pad(q, cu_q, n_q, max_q)
+    K, _, _ = pad(k.to(q.dtype), cu_k, n_k, max_k)
+    V, _, _ = pad(v.to(q.dtype), cu_k, n_k, max_k)
+    mask = (torch.arange(max_k, device=dev)[None] < n_k[:, None])[:, None, None]   # (S, 1, 1, Lk)
+    out = F.scaled_dot_product_attention(Q, K, V, attn_mask=mask, scale=scale)
+    return out.transpose(1, 2)[sq, pq]
+
+
 def _sincos_2d(py, px, n):
     return torch.cat([get_1d_sincos_pos_encoding(px.float(), n // 2),
                       get_1d_sincos_pos_encoding(py.float(), n // 2)], 1)
@@ -124,6 +163,7 @@ class MiSTR(nn.Module):
         for m in backbone.modules():
             if hasattr(m, "use_flash_attn"):
                 m.use_flash_attn = True
+        self.attention = "auto"     # "flash" | "sdpa" | "auto": flash where it runs (see flash_available)
         D = backbone.embedding_size
         self.num_classes = config["num_classes"]
         self.head = nn.Linear(D, self.num_classes * self.coarse_patch ** 2)
@@ -131,9 +171,11 @@ class MiSTR(nn.Module):
         self.register_buffer("quantiles", torch.zeros(LEVELS))   # window entropy, train set
 
     @classmethod
-    def from_pretrained(cls, repo_or_dir: str, device: str = "cuda") -> "MiSTR":
+    def from_pretrained(cls, repo_or_dir: str, device=None, attention: str = "auto") -> "MiSTR":
         """A Hugging Face model repo or a local folder with config.json, backbone/config.json
-        (OlmoEarth's architecture) and model.safetensors."""
+        (OlmoEarth's architecture) and model.safetensors. device: default a GPU if there is one.
+        attention: "flash" (FlashAttention 2, Ampere or newer GPUs; how the paper ran), "sdpa"
+        (PyTorch's attention: any GPU, or CPU) or "auto" (flash where available)."""
         from olmoearth_pretrain.model_loader import load_model_from_path
         from safetensors.torch import load_file
         d = Path(repo_or_dir)
@@ -144,11 +186,42 @@ class MiSTR(nn.Module):
         backbone = load_model_from_path(str(d / "backbone"), load_weights=False)
         model = cls(config, getattr(backbone, "encoder", backbone))
         model.load_state_dict(load_file(str(d / "model.safetensors")))
-        return model.to(device).eval()
+        if attention not in ("auto", "flash", "sdpa"):
+            raise ValueError(f"attention {attention!r}: auto | flash | sdpa")
+        model.attention = attention
+        return model.to(device or ("cuda" if torch.cuda.is_available() else "cpu")).eval()
 
     @property
     def device(self):
         return self.head.weight.device
+
+    @property
+    def flash(self) -> bool:
+        if self.attention == "sdpa":
+            return False
+        ok = flash_available(self.device)
+        if self.attention == "flash" and not ok:
+            raise RuntimeError("attention='flash' needs flash-attn and an Ampere or newer GPU")
+        return ok
+
+    def _amp(self):
+        """bf16 autocast on a GPU (as trained); float32 on CPU (OlmoEarth's patch resizing has no
+        bf16 CPU kernel)."""
+        if self.device.type == "cpu":
+            return contextlib.nullcontext()
+        return torch.autocast(self.device.type, dtype=torch.bfloat16)
+
+    def _block(self, blk, x, cu, mx: int, flash: bool):
+        """One backbone block on packed sequences (the block's own forward under flash)."""
+        if flash:
+            return blk(x=x, cu_seqlens=cu, max_seqlen=mx, attn_mask=None, rope_positions=None)
+        a = blk.attn
+        heads = lambda t: t.view(len(t), a.num_heads, -1)                      # noqa: E731
+        n = blk.norm1(x)
+        o = varlen_attention(a.q_norm(heads(a.q(n))), a.k_norm(heads(a.k(n))), heads(a.v(n)),
+                             cu, cu, mx, mx, a.scale, False)
+        x = x + blk.ls1(a.proj(o.reshape(len(o), -1)))
+        return x + blk.ls2(blk.mlp(blk.norm2(x)))
 
     # -- tokens ---------------------------------------------------------------------------
     def _embed(self, sample, patch: int, slot=None, py=None, px=None) -> Packed:
@@ -177,16 +250,16 @@ class MiSTR(nn.Module):
         (B, 4, h, w, D))."""
         lr = self._embed(x.seasons, self.coarse_patch)
         cu, mx, trace, h = _cu(lr.seqlens), int(lr.seqlens.max()), [], lr.x
+        flash = self.flash
         for blk in self.backbone.blocks:
             trace.append(h)
-            h = blk(x=h, cu_seqlens=cu, max_seqlen=mx, attn_mask=None, rope_positions=None)
+            h = self._block(blk, h, cu, mx, flash)
         return lr, trace, lr.pooled(self.backbone.norm(h)).float()
 
     def _fine(self, lr: Packed, trace, crops: Packed, owner: torch.Tensor) -> torch.Tensor:
         """The fine tokens through every block, reading their tile's coarse tokens at that block
         and the tile's fine tokens -> (N, D) normed."""
-        import flash_attn
-        S, dev = len(lr.seqlens), lr.x.device
+        S, dev, flash = len(lr.seqlens), lr.x.device, self.flash
         t_s = torch.repeat_interleave(owner, crops.seqlens)                     # token -> tile
         order = torch.argsort(t_s, stable=True)
         n_q = torch.bincount(t_s, minlength=S)
@@ -203,8 +276,7 @@ class MiSTR(nn.Module):
             q = a.q_norm(heads(a.q(n_c)))
             k = torch.cat([a.k_norm(heads(a.k(n_lr))), a.k_norm(heads(a.k(n_c)))])[k_order]
             v = torch.cat([heads(a.v(n_lr)), heads(a.v(n_c))])[k_order]
-            out = flash_attn.flash_attn_varlen_func(q, k.to(q.dtype), v.to(q.dtype), cu_q, cu_k,
-                                                    max_q, max_k, softmax_scale=a.scale)
+            out = varlen_attention(q, k, v, cu_q, cu_k, max_q, max_k, a.scale, flash)
             y = torch.empty_like(x_c)
             y[order] = blk.ls1(a.proj(out.reshape(len(out), -1))).to(x_c.dtype)
             x_c = x_c + y
@@ -279,11 +351,11 @@ class MiSTR(nn.Module):
     def predict_tiles(self, x: Inputs, budget: float = 0.5) -> Prediction:
         """A batch of tiles -> per-tile prediction. budget: the share of training windows that
         would be re-encoded (the model was trained at 0.5; lower budgets cost less)."""
-        x = x.to(self.device)
+        x = x.to(self.device, torch.float32 if self.device.type == "cpu" else torch.bfloat16)
         season, present = x.season, x.present
         # bf16 autocast for the backbone and the coarse prediction; selection and the final
         # decoder in fp32 (as in training)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with self._amp():
             lr, trace, lr_F = self._coarse(x)
             logits0 = self._decode(lr_F, season, present).float()
         b, t, y, xx = self._select(logits0, lr_F, season, present, budget)
@@ -292,7 +364,7 @@ class MiSTR(nn.Module):
                               int(len(lr.x)), 0)
         fp = self.fine_patch
         py, px = y * fp, xx * fp
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with self._amp():
             crops = _crop(x.months, b, t, py, px, fp)
             hr = self._embed(crops, fp, slot=season[b, t], py=py, px=px)
             hr_x = self._fine(lr, trace, hr, b)
