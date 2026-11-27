@@ -20,11 +20,14 @@ def export(ckpt: str, out: str, class_names: list[str]):
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     cfg = ck["config"]
     m, s = cfg["model"], cfg["select"]
-    want = dict(backbone="tiny", coarse_patch=8, coarse_time="season", window_px=4, fine_patch=0,
-                attention="one_way", coarse_head=True)
-    if any(m[k] != v for k, v in want.items()) or (s["where"], s["when"]) != ("uncertainty", "attention") \
-            or s["extra_steps"]:
-        raise ValueError(f"{ckpt}: not the released configuration ({m}, {s})")
+    want = dict(backbone="tiny", coarse_time="season", crop_time="month", attention="one_way",
+                coarse_head=True)
+    geo = (m["coarse_patch"], m["window_px"], m["fine_patch"] or m["window_px"])
+    xset = s.get("extra_steps_choices", "")
+    if any(m.get(k, "month" if k == "crop_time" else None) != v for k, v in want.items()) or (s["where"], s["when"]) != ("uncertainty", "attention") \
+            or s["extra_steps"] or geo not in ((8, 4, 4), (6, 6, 3)) \
+            or xset not in ("", "0,0.5,1") or (xset and s["extra_pick"] != "disagree"):
+        raise ValueError(f"{ckpt}: not a released configuration ({m}, {s})")
     sd = {}
     for k, v in ck["model"].items():
         if k in DROP:
@@ -36,12 +39,17 @@ def export(ckpt: str, out: str, class_names: list[str]):
             raise KeyError(f"unmapped key {k}")
         sd[new] = v.contiguous()
     sd["quantiles"] = ck["selector"]["0.tab_s"].contiguous()
+    if xset:        # the second season's threshold table (val refit, as tested)
+        sd["quantiles_x"] = ck["selector"]["0.tab_x"].contiguous()
+        sd["ratio_x"] = ck["selector"]["0.ratio_x"].contiguous()
     o = Path(out)
     (o / "backbone").mkdir(parents=True, exist_ok=True)
     shutil.copy(_resolve_artifact_path(ModelID.OLMOEARTH_V1_TINY, "config.json"), o / "backbone/config.json")
     save_file(sd, str(o / "model.safetensors"))
-    config = {"backbone": "OlmoEarth-v1-Tiny", "coarse_patch": 8, "fine_patch": 4,
-              "train_budget": s["percentage"], "num_classes": len(class_names),
+    config = {"backbone": "OlmoEarth-v1-Tiny", "coarse_patch": geo[0], "window_px": geo[1],
+              "fine_patch": geo[2], "train_budget": s["percentage"],
+              **({"extra_pick": "disagree", "seasons": [1, 1.5, 2]} if xset else {}),
+              "num_classes": len(class_names),
               "class_names": class_names, "task": cfg["task"], "source_run": Path(ckpt).stem}
     (o / "config.json").write_text(json.dumps(config, indent=1) + "\n")
     return o

@@ -44,15 +44,25 @@ def test_prepare_missing_month_and_valid_mask():
     assert not (x.months.sentinel2_l2a[0, 10:, :, 0].float() == m[:1, :1]).all()
 
 
-def test_predict():
+@pytest.mark.parametrize("repo,seasons", [("TimZhou/mistr-olmoearth-tiny-pastis", (1,)),
+                                          ("TimZhou/mistr-olmoearth-tiny-pastis-s6s3", (1, 1.5, 2))])
+def test_predict(repo, seasons):
     from mistr import MiSTR
     try:
-        model = MiSTR.from_pretrained("TimZhou/mistr-olmoearth-tiny-pastis")
+        model = MiSTR.from_pretrained(repo)
     except Exception as e:                                                  # offline
         pytest.skip(f"model not available: {e}")
     s2, d2, s1, d1 = series()
-    out = model.predict(prepare(s2, d2, s1, d1, "2018-10"), budget=0.25)
-    assert out.logits.shape == (19, 70, 130) and out.classes.shape == (70, 130)
-    lo = model.predict(prepare(s2, d2, s1, d1, "2018-10"), budget=0.05)
-    assert lo.fine_tokens <= out.fine_tokens
-    assert (out.windows[:, 1] < 70).all() and (out.windows[:, 2] < 130).all()
+    x = prepare(s2, d2, s1, d1, "2018-10")
+    prev = -1
+    for s in seasons:
+        out = model.predict(x, budget=0.4, seasons=s)
+        assert out.logits.shape == (19, 70, 130) and out.classes.shape == (70, 130)
+        assert out.fine_tokens >= prev
+        prev = out.fine_tokens
+        assert (out.windows[:, 1] < 70).all() and (out.windows[:, 2] < 130).all()
+    lo = model.predict(x, budget=0.05)
+    assert lo.fine_tokens <= model.predict(x, budget=0.4).fine_tokens
+    if len(seasons) == 1:
+        with pytest.raises(ValueError):
+            model.predict(x, seasons=2)

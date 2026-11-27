@@ -13,7 +13,7 @@ decoder combines both. The backbone is [OlmoEarth](https://github.com/allenai/ol
 
 This repository has two parts:
 
-- `mistr/`: the model, ready to use (about 500 lines: `model.py`, `inputs.py`).
+- `mistr/`: the model, ready to use (about 800 lines: `model.py`, `inputs.py`).
 - `paper/`: everything to reproduce the paper (training, baselines, every figure and table); see
   [`paper/README.md`](paper/README.md).
 
@@ -41,14 +41,14 @@ FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE pip install --no-build-isolation flash-attn
 ```python
 from mistr import MiSTR, prepare
 
-model = MiSTR.from_pretrained("TimZhou/mistr-olmoearth-tiny-pastis")   # downloads ~26 MB; GPU if there is one
+model = MiSTR.from_pretrained("TimZhou/mistr-olmoearth-tiny-pastis-s6s3")   # ~26 MB; GPU if there is one
 
 x = prepare(s2, s2_dates, s1, s1_dates, start="2018-10")   # one image's time series, any size
-out = model.predict(x, budget=0.5)
+out = model.predict(x, budget=0.5, seasons=2)
 
 out.classes        # (H, W) crop type per pixel (model.config["class_names"])
 out.logits         # (19, H, W)
-out.windows        # (N, 3) the re-encoded (month, y, x): 4 x 4 px windows, top-left pixel
+out.windows        # (N, 3) the re-encoded (month, y, x): windows of out.window_px px, top-left pixel
 out.coarse_logits  # the coarse pass's own prediction
 ```
 
@@ -68,35 +68,45 @@ image into 64 x 64 px tiles, padding the bottom and right edges. `predict` runs 
 batches and stitches the result back to H x W. A month with no valid frame in a modality is
 treated as missing.
 
-**Budget.** `budget` is the share of 4 x 4 px windows that get fine tokens, measured on the
-training distribution. A fixed threshold on the coarse prediction's uncertainty, shipped with the
-weights, decides which windows; so an image with more uncertain areas gets more fine tokens. The
-model was trained at 0.5, and lower budgets trade accuracy for compute (PASTIS test split, 1,984
-tiles):
+**Budget and seasons.** `budget` is the share of windows that get fine tokens, measured on the
+validation distribution. A fixed threshold on the coarse prediction's uncertainty, shipped with the
+weights, decides which windows; so an image with more uncertain areas gets more fine tokens. Both
+models were trained at 0.5, and lower budgets trade accuracy for compute. `seasons` (S6+S3 model
+only) re-encodes each selected window in 1 or 2 seasons. At 1.5, only the more uncertain windows
+get a second season; at budgets of 0.25 or less every selected window does, so 1.5 and 2 coincide.
 
-| budget | test mIoU | fine tokens / tile |
-|---|---|---|
-| 0.5 (trained) | 57.29 | 1,517 |
-| 0.4 | 56.93 | 1,219 |
-| 0.3 | 56.39 | 919 |
-| 0.25 | 56.06 | 770 |
-| 0.2 | 55.67 | 620 |
-| 0.15 | 54.94 | 469 |
-| 0.1 | 53.84 | 318 |
-| 0.05 | 52.57 | 164 |
-| 0 (coarse pass only) | 50.60 | 0 |
+## The released models
 
-Each 64 px tile always costs 1,024 coarse tokens: 4 seasons x 64 patches x 4 token groups (3
-Sentinel-2 band groups and Sentinel-1). A selected window adds 4 fine tokens for each month of its
-selected season.
-
-## The released model
-
-`TimZhou/mistr-olmoearth-tiny-pastis`: OlmoEarth-v1-Tiny, fine-tuned for crop-type segmentation on
+Both are OlmoEarth-v1-Tiny, fine-tuned for crop-type segmentation on
 [PASTIS-R](https://github.com/VSainteuf/pastis-benchmark): 19 classes, agricultural parcels in
-France, October 2018 to September 2019, trained on folds 1-3. It reaches 57.3 test mIoU (fold 5)
-at budget 0.5, the configuration called S8 seasonal + S4 monthly in the paper. On other regions,
-years or crop types, expect to fine-tune: see `paper/` for the training code.
+France, October 2018 to September 2019, trained on folds 1-3, tested on fold 5 (1,984 tiles).
+
+| model | coarse / fine tokens | coarse tokens / tile |
+|---|---|---|
+| [`TimZhou/mistr-olmoearth-tiny-pastis-s6s3`](https://huggingface.co/TimZhou/mistr-olmoearth-tiny-pastis-s6s3) | 6 px seasonal / 3 px monthly (6 px windows), 1-2 seasons per window | 1,936 |
+| [`TimZhou/mistr-olmoearth-tiny-pastis`](https://huggingface.co/TimZhou/mistr-olmoearth-tiny-pastis) | 8 px seasonal / 4 px monthly, 1 season per window | 1,024 |
+
+Test mIoU and fine tokens per 64 px tile:
+
+| model | seasons | budget | test mIoU | fine tokens / tile |
+|---|---|---|---|---|
+| S6+S3 | 2 | 0.5 (trained) | **61.21** | 5,666 |
+| S6+S3 | 1.5 | 0.5 | 60.87 | 4,279 |
+| S6+S3 | 2 or 1.5 | 0.25 | 59.61 | 2,881 |
+| S6+S3 | 1 | 0.5 | 58.96 | 2,843 |
+| S6+S3 | 2 or 1.5 | 0.1 | 57.27 | 1,239 |
+| S6+S3 | any | 0 (coarse pass only) | 52.96 | 0 |
+| S8+S4 | 1 | 0.5 (trained) | 57.29 | 1,517 |
+| S8+S4 | 1 | 0.25 | 56.06 | 770 |
+| S8+S4 | 1 | 0.1 | 53.84 | 318 |
+| S8+S4 | 1 | 0 (coarse pass only) | 50.60 | 0 |
+
+A coarse token covers 4 seasons x one patch x 4 token groups (3 Sentinel-2 band groups and
+Sentinel-1). A selected window adds, per month of each selected season, 4 tokens per fine patch
+(S6+S3: four 3 px patches per 6 px window). In the paper these are S6 seasonal + S3 monthly (its
+flexible temporal budget appendix, 60.9 ± 0.2 mIoU over three seeds with 2 seasons; this is seed 1)
+and S8 seasonal + S4 monthly. On other regions, years or crop types, expect to fine-tune: see
+`paper/` for the training code.
 
 Results can differ in the last bf16 bits with the batch size (`predict(..., batch_size=)`), which
 flips the class of very few pixels.
